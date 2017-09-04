@@ -1,8 +1,9 @@
 {-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE RecursiveDo #-}
 module Main where
 
+import Control.Monad.Fix (MonadFix)
 import qualified Control.Concurrent         as C
-import Control.Applicative (liftA2)
 import           Control.Monad              (forever)
 
 import           Reactive.Banana.Frameworks (AddHandler, MomentIO)
@@ -14,7 +15,6 @@ import qualified Reactive.Banana            as RB
 import qualified Graphics.Vty               as Vty
 
 import qualified Data.Sequence as S
-import Data.Monoid ((<>))
 
 import           System.Exit                (exitSuccess)
 
@@ -71,6 +71,33 @@ stolenLeftMost
 stolenLeftMost =
   foldl (RB.unionWith const) RB.never
 
+bText
+  :: ( RB.MonadMoment m
+     , MonadFix m
+     )
+  => RB.Event Vty.Event
+  -> (Vty.Key -> [Vty.Modifier] -> RB.Event Vty.Event)
+  -> m (RB.Behavior (S.Seq Char))
+bText eEvts eKey' = mdo
+  let tmsg = S.empty
+
+  RB.accumB tmsg $ stolenLeftMost
+    [ bkSpc <$ eKey' Vty.KBS []
+    , const S.empty <$ eKey' (Vty.KChar 'w') [Vty.MCtrl]
+    , (\c -> (S.|> c)) <$> eChars
+    ]
+
+  where
+    bkSpc msg = case S.viewr msg of
+      S.EmptyR -> S.empty
+      (xs S.:> _) -> xs
+
+    isChar (Vty.EvKey (Vty.KChar k) _) = Just k
+    isChar _                           = Nothing
+
+    eChars =
+      RB.filterJust (isChar <$> eEvts)
+
 networkDesc
   :: ES Vty.Event
   -> ES Tick
@@ -90,35 +117,29 @@ networkDesc vtyES tick vty tickT = do
   let
       eEnter = eKey' Vty.KEnter []
 
-      bkSpc msg = case S.viewr msg of
-              S.EmptyR -> S.empty
-              (xs S.:> _) -> xs
-
-      isChar (Vty.EvKey (Vty.KChar k) _) = Just k
-      isChar _                           = Nothing
-
-      eChars =
-        RB.filterJust (isChar <$> eEvts)
-
       -- I looked this up, not going to lie
       eQuit = stolenLeftMost
         [ eKey' Vty.KEsc []
         , eKey' (Vty.KChar 'c') [Vty.MCtrl]
         ]
 
-  bMsg <- RB.accumB S.empty $ RB.unions
-    [ (\c -> (S.|> c)) <$> eChars
-    , bkSpc <$ eKey' Vty.KBS []
-    ]
+  bMsg <- bText eEvts eKey'
 
   bEnter <- RB.accumB False $ RB.unions
     [ const True <$ eEnter
     , const False <$ eTicked
     ]
 
-  let bImg' = liftA2 (<>)
-        (textInput . (foldr (:) []) <$> bMsg)
-        (eventLine <$> bEnter)
+  bCtrlBS <- RB.accumB Nothing $ RB.unions
+    [ (const . Just) <$> eEvts
+    ]
+
+  -- This is the bit that needs most of the work... how does tree
+  let bImg' = mconcat <$> sequenceA
+                [ textInput . (foldr (:) []) <$> bMsg
+                , eventLine <$> bEnter
+                , eventLine <$> bCtrlBS
+                ]
 
   RB.reactimate $ updateImage vty <$> bImg' <@ eTicked
   RB.reactimate $ quit vty tickT <$ eQuit
