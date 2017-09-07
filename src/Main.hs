@@ -1,10 +1,11 @@
-{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE LambdaCase  #-}
 {-# LANGUAGE RecursiveDo #-}
 module Main where
 
-import Control.Monad.Fix (MonadFix)
 import qualified Control.Concurrent         as C
+import           Control.Lens               (snoc, unsnoc)
 import           Control.Monad              (forever)
+import           Control.Monad.Fix          (MonadFix)
 
 import           Reactive.Banana.Frameworks (AddHandler, MomentIO)
 import qualified Reactive.Banana.Frameworks as RB
@@ -14,7 +15,9 @@ import qualified Reactive.Banana            as RB
 
 import qualified Graphics.Vty               as Vty
 
-import qualified Data.Sequence as S
+import           Data.Maybe                 (fromMaybe)
+import           Data.Semigroup             ((<>))
+import qualified Data.Sequence              as S
 
 import           System.Exit                (exitSuccess)
 
@@ -82,21 +85,59 @@ bText eEvts eKey' = mdo
   let tmsg = S.empty
 
   RB.accumB tmsg $ stolenLeftMost
-    [ bkSpc <$ eKey' Vty.KBS []
-    , const S.empty <$ eKey' (Vty.KChar 'w') [Vty.MCtrl]
-    , (\c -> (S.|> c)) <$> eChars
+    [ fromMaybe S.empty . fmap fst . unsnoc <$  eKey' Vty.KBS []
+    , const S.empty                         <$  eKey' (Vty.KChar 'k') [Vty.MCtrl]
+    , flip snoc                             <$> eAlphaNumChar
+    ]
+  where
+    okChars =
+      ['a'..'z'] <> ['A' .. 'Z'] <> ['0' .. '9']
+
+    isAlphaNum (Vty.EvKey (Vty.KChar k) m)
+      | k `elem` okChars && (null m || m == [Vty.MShift]) = Just k
+      | otherwise = Nothing
+    isAlphaNum _  = Nothing
+
+    eAlphaNumChar =
+      RB.filterJust (isAlphaNum <$> eEvts)
+
+seqToList
+  :: S.Seq a
+  -> [a]
+seqToList =
+  foldr (:) []
+
+lolLatin
+  :: S.Seq Char
+  -> S.Seq Char
+lolLatin =
+  S.fromList
+  . unwords
+  . fmap (`mappend` "us")
+  . words
+  . seqToList
+
+bIncDec
+  :: ( MonadFix m,
+       RB.MonadMoment m
+     )
+  => (Vty.Key -> [Vty.Modifier] -> RB.Event Vty.Event)
+  -> m (RB.Behavior Vty.Image)
+bIncDec eKey' = mdo
+  let z = (0 :: Int)
+      ePlus  = eKey' (Vty.KChar '+') []
+      eMinus = eKey' (Vty.KChar '-') []
+
+      mkImg :: Int -> Vty.Image
+      mkImg = Vty.string (Vty.defAttr `Vty.withBackColor` Vty.red) . show
+
+  bNum' <- RB.accumB z $ stolenLeftMost
+    [ (+ 1)        <$ ePlus
+    , const z      <$ RB.filterE (<= 0) ( bNum' <@ eMinus )
+    , (subtract 1) <$ eMinus
     ]
 
-  where
-    bkSpc msg = case S.viewr msg of
-      S.EmptyR -> S.empty
-      (xs S.:> _) -> xs
-
-    isChar (Vty.EvKey (Vty.KChar k) _) = Just k
-    isChar _                           = Nothing
-
-    eChars =
-      RB.filterJust (isChar <$> eEvts)
+  pure $ mkImg <$> bNum'
 
 networkDesc
   :: ES Vty.Event
@@ -110,12 +151,13 @@ networkDesc vtyES tick vty tickT = do
   -- Pull in our events from the Vty system
   eEvts <- RB.fromAddHandler $ addHandler vtyES
 
-  let eKey' = eKey eEvts
   -- We're ticking at (if my numbers are correct) 24/ticks a second.
   eTicked <- RB.fromAddHandler $ addHandler tick
 
-  let
+  let eKey' = eKey eEvts
       eEnter = eKey' Vty.KEnter []
+
+      eTranslate = eKey' (Vty.KChar 't') [Vty.MCtrl]
 
       -- I looked this up, not going to lie
       eQuit = stolenLeftMost
@@ -125,24 +167,30 @@ networkDesc vtyES tick vty tickT = do
 
   bMsg <- bText eEvts eKey'
 
+  bLatinus <- RB.stepper mempty
+    ( lolLatin <$> bMsg <@ eTranslate )
+
   bEnter <- RB.accumB False $ RB.unions
-    [ const True <$ eEnter
+    [ const True  <$ eEnter
     , const False <$ eTicked
     ]
 
   bCtrlBS <- RB.accumB Nothing $ RB.unions
-    [ (const . Just) <$> eEvts
+    [ const . Just <$> eEvts
     ]
 
+  bNum <- bIncDec eKey'
   -- This is the bit that needs most of the work... how does tree
   let bImg' = mconcat <$> sequenceA
-                [ textInput . (foldr (:) []) <$> bMsg
-                , eventLine <$> bEnter
-                , eventLine <$> bCtrlBS
+                [ textInput . seqToList <$> bMsg
+                , eventLine             <$> bEnter
+                , eventLine             <$> bCtrlBS
+                , textInput . seqToList <$> bLatinus
+                , bNum
                 ]
 
   RB.reactimate $ updateImage vty <$> bImg' <@ eTicked
-  RB.reactimate $ quit vty tickT <$ eQuit
+  RB.reactimate $ quit vty tickT  <$ eQuit
 
 main :: IO ()
 main = do
