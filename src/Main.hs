@@ -131,7 +131,7 @@ bIncDec eKey' = mdo
       mkImg :: Int -> Vty.Image
       mkImg = Vty.string (Vty.defAttr `Vty.withBackColor` Vty.red) . show
 
-  bNum' <- RB.accumB z $ stolenLeftMost
+  bNum' <- RB.accumB z $ RB.unions
     [ (+ 1)        <$ ePlus
     , const z      <$ RB.filterE (<= 0) ( bNum' <@ eMinus )
     , (subtract 1) <$ eMinus
