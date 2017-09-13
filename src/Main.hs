@@ -1,10 +1,13 @@
+{-# LANGUAGE FlexibleContexts          #-}
 {-# LANGUAGE LambdaCase                #-}
 {-# LANGUAGE NoMonomorphismRestriction #-}
 {-# LANGUAGE RecursiveDo               #-}
 module Main where
 
 import qualified Control.Concurrent         as C
+import           Control.Lens               (snoc)
 import           Control.Monad              (forever)
+import           Control.Monad.Fix          (MonadFix)
 
 import           Reactive.Banana.Frameworks (AddHandler, MomentIO)
 import qualified Reactive.Banana.Frameworks as RB
@@ -14,13 +17,22 @@ import qualified Reactive.Banana            as RB
 
 import qualified Graphics.Vty               as Vty
 
+import           Data.Maybe                 (fromMaybe)
+
+import           Data.List.NonEmpty         (NonEmpty (..))
+import qualified Data.List.NonEmpty         as NE
+
+import           Data.Text                  (Text)
+import qualified Data.Text                  as Text
+
+import qualified Data.Sequence              as S
 import           System.Exit                (exitSuccess)
 
-import           TextInput (bTextInput)
 import           Common                     (KeyInput (..), greenText, keyInEvt,
                                              keyInModEvt, leftMost, mkKeyInput,
                                              seqToList, updateImage, yellowText)
-import           IncDec                     (bIncDec)
+import           IncDec                     (bIncDecNum)
+import           TextInput                  (bTextInput)
 
 data ES a = ES
   { addHandler :: AddHandler a
@@ -31,12 +43,21 @@ data Tick = Tick
 
 data InputTag
   = A
-  | B
+  | EmailFld Int
   deriving ( Show, Eq )
 
-nextInp :: InputTag -> InputTag
-nextInp A = B
-nextInp B = A
+newtype FieldId
+  = Fld InputTag
+  deriving (Show, Eq)
+
+type InputSeq
+  = NonEmpty FieldId
+
+shiftToNextInput
+  :: InputSeq
+  -> InputSeq
+shiftToNextInput is =
+  NE.head is :| snoc (NE.tail is) ( NE.head is )
 
 eLoop
   :: Vty.Vty
@@ -80,40 +101,82 @@ networkDesc vtyES tick vty tickTid = do
   eTicked <- toE tick
 
   let
-    eForwardTab  = keyInEvt eKey (Vty.KChar '\t')
+    eForwardTab = keyInEvt eKey (Vty.KChar '\t')
+    ePlus       = keyInEvt eKey (Vty.KChar '+')
+    eMinus      = keyInEvt eKey (Vty.KChar '-')
+
+    minSeq = Fld A :| []
 
     eQuit = leftMost
       [ keyInEvt eKey Vty.KEsc
       , keyInModEvt eKey (Vty.KChar 'c') [Vty.MCtrl]
       ]
 
-  bCtrlBS <- RB.stepper Nothing ( Just <$> keyInAllEvts eKey )
-  bNum    <- bIncDec eKey
+  -- Active field is a ``Seq Field`` that is a combination of the initial
+  -- field(s), plus the number of other fields that have been created.
+  let rmvLastEmail ix =
+        fromMaybe minSeq
+        . NE.nonEmpty
+        . NE.filter (\(Fld (EmailFld ix')) -> ix' == ix)
 
-  bActive <- RB.accumB A ( nextInp <$ eForwardTab )
-  bMsg1 <- bTextInput eKey bActive (== A)
-  bMsg2 <- bTextInput eKey bActive (== B)
+      addEmailField i fs
+        = NE.head fs :| snoc (NE.tail fs) (Fld (EmailFld i))
+
+  bCtrlBS <- RB.stepper Nothing ( Just <$> keyInAllEvts eKey )
+  bNum    <- bIncDecNum eKey
+
+  bActive <- RB.accumB minSeq $ leftMost
+    [ shiftToNextInput <$  eForwardTab
+    , rmvLastEmail     <$> bNum <@ eMinus
+    , addEmailField    <$> bNum <@ ePlus
+    ]
+
+  let
+    eIncDec = leftMost [ePlus, eMinus]
+
+    isAField a xs
+      = Fld a == ( NE.head xs )
+
+    mkEmailField =
+      bTextInput eKey bActive . isAField . EmailFld
+
+    exeEmailFields
+      :: ( RB.MonadMoment m
+         , MonadFix m
+         )
+      => Int
+      -> m ( RB.Behavior (S.Seq Text) )
+    exeEmailFields n =
+      sequenceA <$> traverse mkEmailField ( S.fromList [0 .. n] )
+
+    eFieldList =
+      exeEmailFields <$> bNum <@ eIncDec
+
+  bName <- bTextInput eKey bActive ( isAField A )
+
+  bFieldsBs <- RB.execute eFieldList >>=
+    RB.switchB (pure S.empty)
 
   -- This is the bit that needs most of the work... how does tree
   let
     bImg' = mconcat <$> sequenceA
-      [ textInput . seqToList <$> bMsg1
-      , textInput . seqToList <$> bMsg2
-      , eventLine             <$> bActive
-      , eventLine             <$> bCtrlBS
-      , bNum
+      [ textInput . seqToList             <$> bName
+      , eventLine                         <$> bNum
+      , eventLine                         <$> bCtrlBS
+      , eventLine                         <$> bActive
+      , foldMap (textInput . Text.unpack) <$> bFieldsBs
       ]
 
-  RB.reactimate $ updateImage vty <$> bImg' <@ eTicked
-  RB.reactimate $ quit vty tickTid <$ eQuit
+  RB.reactimate $ updateImage vty  <$> bImg' <@ eTicked
+  RB.reactimate $ quit vty tickTid <$  eQuit
 
 main :: IO ()
 main = do
   let mkES = uncurry ES <$> RB.newAddHandler
   vtty <- Vty.mkVty Vty.defaultConfig
 
-  vtyES <- mkES
-  tick <- mkES
+  vtyES   <- mkES
+  tick    <- mkES
   tickTid <- C.forkIO $ eTickLoop tick
 
   network <- RB.compile (networkDesc vtyES tick vtty tickTid)

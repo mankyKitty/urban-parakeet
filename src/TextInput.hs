@@ -1,6 +1,5 @@
-{-# LANGUAGE RecursiveDo #-}
-{-# LANGUAGE FlexibleContexts #-}
-module TextInput (bTextInput) where
+{-# LANGUAGE FlexibleContexts      #-}
+module TextInput (bTextInput', bTextInput) where
 
 import           Control.Lens      (Snoc, snoc, unsnoc)
 import           Control.Monad.Fix (MonadFix)
@@ -9,7 +8,8 @@ import qualified Reactive.Banana   as RB
 
 import qualified Graphics.Vty      as Vty
 
-import           Common            (KeyInput, keyInAllEvts, keyInModEvt, keyInEvt, leftMost)
+import           Common            (KeyInput, keyInAllEvts, keyInEvt,
+                                    keyInModEvt, leftMost)
 
 okChars
   :: [Char]
@@ -34,6 +34,28 @@ eAlphaNumChar
 eAlphaNumChar eKeyIn =
   RB.filterJust (isAlphaNum <$> keyInAllEvts eKeyIn)
 
+bTextInput'
+  :: ( RB.MonadMoment m
+     , MonadFix m
+     , Monoid t
+     , Snoc t t Char Char
+     )
+  => KeyInput
+  -> RB.Behavior a
+  -> ( a -> Bool )
+  -> t
+  -> m (RB.Behavior t)
+bTextInput' eKeyIn bAcceptingInput tagFn startV = do
+  let
+    eBackSpace = keyInEvt eKeyIn Vty.KBS
+    eKillAll   = keyInModEvt eKeyIn (Vty.KChar 'k') [Vty.MCtrl]
+
+  RB.accumB startV . RB.whenE ( tagFn <$> bAcceptingInput ) $ leftMost
+    [ maybe mempty fst . unsnoc       <$  eBackSpace
+    , const mempty                    <$  eKillAll
+    , flip snoc                       <$> eAlphaNumChar eKeyIn
+    ]
+
 bTextInput
   :: ( RB.MonadMoment m
      , MonadFix m
@@ -44,13 +66,5 @@ bTextInput
   -> RB.Behavior a
   -> ( a -> Bool )
   -> m (RB.Behavior t)
-bTextInput eKeyIn bAcceptingInput tagFn = mdo
-  let
-    eBackSpace = keyInEvt eKeyIn Vty.KBS
-    eKillAll   = keyInModEvt eKeyIn (Vty.KChar 'k') [Vty.MCtrl]
-
-  RB.accumB mempty . RB.whenE ( tagFn <$> bAcceptingInput ) $ leftMost
-    [ maybe mempty fst . unsnoc <$  eBackSpace
-    , const mempty              <$  eKillAll
-    , flip snoc                 <$> eAlphaNumChar eKeyIn
-    ]
+bTextInput eKeyIn bAcceptingInput tagFn =
+  bTextInput' eKeyIn bAcceptingInput tagFn mempty

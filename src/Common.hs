@@ -6,8 +6,8 @@ import qualified Reactive.Banana as RB
 
 data KeyInput = KeyInput
   { keyInAllEvts :: RB.Event Vty.Event
-  , keyInModEvt    :: Vty.Key -> [Vty.Modifier] -> RB.Event Vty.Event
-  , keyInEvt       :: Vty.Key -> RB.Event Vty.Event
+  , keyInModEvt  :: Vty.Key -> [Vty.Modifier] -> RB.Event Vty.Event
+  , keyInEvt     :: Vty.Key -> RB.Event Vty.Event
   }
 
 mkKeyInput
